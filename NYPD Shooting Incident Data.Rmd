@@ -1,0 +1,257 @@
+---
+title: "Analysis of NYPD Shooting Incident Data"
+author: "A Nonny Mouse"
+date: "2023-02-28"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r display-code-and-results, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Overview
+This notebook will analyze the [New York City Police Department Shooting Incident data](https://data.cityofnewyork.us/Public-Safety/NYPD-Shooting-Incident-Data-Historic-/833y-fsy8).  The data contains a breakdown of all shooting incidents that have occurred in NYC between January 1, 2006 and December 31, 2021. The data has been extracted every quarter and reviewed by the Office of Management Analysis and Planning.  In addition to the data itself, there is also a description of each of the columns included in the data set.  
+
+## Objective
+
+We will retrieve the data, tidy it, transform it, and perform some analysis, looking at incidents by borough and race.  Which borough is the most dangerous?  Which race is most likely to be a shooting victim?  We may perform some modeling on the data to verify underlying assumptions.  Finally, we will attempt to identify any sources of bias in the data and our analysis.
+
+### Import Libraries
+We will use the tidyverse and lubridate libraries.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+```
+
+
+### Retrieve the Data
+
+```{r fetch-csv, echo=TRUE, message=FALSE}
+input <- read_csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+```
+
+### Review Data
+
+Take a quick look at the data, see if there are columns that will not be used, review columns for correct data type, and take a quick look for missing data.
+
+```{r show-input, echo=TRUE}
+input
+```
+### Drop Unneeded Columns
+Looking at the data, we see that there is geographic information: X_COORD_CD, Y_COORD_CD, Latitude, Longitude, Lon_Lat.  As we won't be performing any geographic analysis, we will get rid of these columns.
+
+
+```{r drop-geo-columns, echo=TRUE}
+input <- select(
+  input, -c(
+    X_COORD_CD, Y_COORD_CD, Latitude, Longitude, Lon_Lat
+    )
+  )
+```
+
+### Convert OCCUR_DATE to type date and Sort by Date and Time, then add MONTH, DAY, and YEAR columns for analysis later
+We see that OCCUR_DATE is of type char. Let's convert that to type date so it's more useful to us. Now sort by date and time.
+```{r make-date, echo=TRUE}
+input <- input %>%
+  mutate(OCCUR_DATE = mdy(`OCCUR_DATE`)) %>%
+  arrange(as.POSIXct(paste(OCCUR_DATE, OCCUR_TIME)))
+input$MONTH <- lubridate::month(input$OCCUR_DATE)
+input$DAY <- lubridate::day(input$OCCUR_DATE)
+input $YEAR <- lubridate::year(input$OCCUR_DATE)
+```
+
+
+### Counts of Missing Data by Column
+
+Some of the columns seem to have many NAs. If true, this will make them less useful for further analysis.
+
+
+```{r count_NAs}
+input %>% summarize_all(~ sum(is.na(.)))
+```
+We see that JURISDICTION_CODE has 2 NAs and LOCATION_DESCRIPTION, PERP_AGE_GROUP, PERP_SEX, and PERP_RACE all contain many NAs
+
+### Fill Missing Data
+
+We will the 2 missing values for JURISDICTION_CODE with 3 (non-NYPD) and fill missing data in LOCATION_DESCRIPTION, PERP_AGE_GROUP, PERP_SEX, and PERP_RACE with the value UNKNOWN.
+
+```{r drop-na, echo=TRUE}
+input <- input %>% replace_na(list(JURISDICTION_CODE = 3))
+input[is.na(input)] <- "UNKNOWN"
+```
+
+
+
+### Convert All Columns of type char to type factor
+
+```{r factorize, echo=TRUE}
+input <- input %>% 
+    mutate_if(is.character,as.factor)
+```
+### Summary of NYPD Shooting Incident Data (Historic) So Far
+
+Examine the summary of the data, again looking for anything that requires more investigation
+
+```{r summary-input, echo=TRUE}
+summary(input,na.rm=TRUE)
+```
+### Number of Victims per Borough
+
+```{r enumerate-vics, echo=TRUE}
+input <- input %>%
+  mutate(NUM_VIC=1)
+```
+
+
+```{r NYC-by-boro, echo=TRUE, message=FALSE}
+input_by_boro <- input %>%
+  group_by(BORO, PRECINCT, OCCUR_DATE) %>%
+  summarize(NUM_VIC = sum(NUM_VIC), .groups = "drop") %>%
+  select(BORO, PRECINCT, OCCUR_DATE, NUM_VIC) %>%
+  ungroup()
+summary(input_by_boro$BORO)
+```
+
+### Bar Chart of Shootings by Borough
+
+```{r bar_chart_by_boro}
+input_by_boro %>%
+  group_by(BORO) %>%
+  mutate(count = n()) %>%
+  ggplot(aes(x = reorder(BORO, -count))) +
+    ggtitle("Number of Shootings per Borough") +
+    xlab("Borough") + ylab("Shootings") +
+    geom_bar(stat = "count", width = 0.75, fill = "lightblue") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+``` {r total-vics}
+total_vics = input %>%
+summarize(TOTAL_VICTIMS = sum(NUM_VIC))
+```
+```{r percent-brooklyn-victims}
+brooklyn_vics <- input[input$BORO == "BROOKLYN",] %>%
+  summarize(BROOKLYN_VICTIMS = sum(NUM_VIC))
+pct_tot_vics <- brooklyn_vics / total_vics * 100
+cat(sprintf("Percent of Victims in Brooklyn: %.2f%%\n", pct_tot_vics))
+```
+
+```{r top-10-vics-by-prec}
+input_by_boro %>%
+  group_by(PRECINCT) %>%
+  summarize(VICTIMS = sum(NUM_VIC)) %>%
+  slice_max(VICTIMS, n = 10)
+
+
+```
+
+### Percent of Victims in Top 10 Precincts
+
+```{r top-10-percent}
+
+top_10_vics <- input_by_boro %>%
+  group_by(PRECINCT) %>%
+  summarize(VICTIMS = sum(NUM_VIC)) %>%
+  slice_max(VICTIMS, n = 10) %>%
+  summarize(TOTAL_VICTIMS_IN_TOP_10 = sum(VICTIMS))
+
+total_vics = input %>%
+summarize(TOTAL_VICTIMS = sum(NUM_VIC))
+
+total_precincts <- n_distinct(input$PRECINCT)
+
+pct_tot_vics <- top_10_vics / total_vics * 100
+cat(sprintf("Total Number of Precincts: %d\n", total_precincts))
+cat(sprintf("Percent of Victims in 10 Top Precincts: %.2f%%\n", pct_tot_vics))
+
+```
+
+### Bar Chart of Victims by Race 
+
+```{r bar_chart_vic_by_race}
+input %>%
+group_by(VIC_RACE) %>%
+mutate(count = n()) %>%
+ggplot(aes(x = reorder(VIC_RACE, -count))) +
+    ggtitle("Number of Shootings by Race") +
+    xlab("Race") + ylab("Shootings (log 10 scaling)") +
+geom_bar(stat = "count", width = 0.75, fill = "lightblue") +
+stat_count(geom = "text", colour = "black", size = 3.5,
+aes(label = after_stat(count)),position=position_stack(vjust=0.5)) +
+scale_y_log10() +
+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+```
+```{r percent-black-victims}
+black_vics <- input[input$VIC_RACE == "BLACK",] %>%
+  summarize(BLACK_VICTIMS = sum(NUM_VIC))
+
+pct_black_vics <- black_vics / total_vics * 100
+cat(sprintf("Percent of Victims Who Are Black: %.2f%%\n", pct_black_vics))
+```
+### Shootings Versus Murders
+Let's compare the shootings to how many resulted in a murder
+``` {r murders}
+shootings_per_year <- input %>%
+  group_by(YEAR) %>%
+  summarize(shootings = n(), murders = sum(STATISTICAL_MURDER_FLAG)) %>%
+  mutate(percent_murders = murders / shootings * 100)
+
+shootings_per_year %>%
+  ggplot(aes(x = YEAR, y = shootings)) +
+    geom_line(aes(color = "shootings")) +
+    geom_point(aes(color = "shootings")) +
+    geom_line(aes(y = murders, color = "murders")) +
+    geom_point(aes(y = murders, color = "murders")) +
+    theme(legend.title = element_blank()) +
+    labs(title = "Shootings and Murders by Year", y = NULL)
+```
+
+### Modeling
+Is there a relationship between the number of shootings and the number of murders?
+```{r linear-model} 
+model_murder <- lm(murders ~ shootings, data = shootings_per_year)
+# Show the summary of the model
+summary(model_murder)
+```
+We have an R^2^ of 0.9215 which says that roughly 92% of the variance found in the variable "murders" can be explained by the variable "shootings".
+
+Let's graph the result and see how it looks
+``` {r graph-model}
+shootings_per_year_pred <- shootings_per_year %>% 
+  mutate(pred = predict(model_murder))
+
+shootings_per_year_pred %>%
+  ggplot() +
+  geom_point(aes(x = shootings, y = murders), color ="red") +
+   geom_line(aes(x = shootings, y = pred), color ="lightblue") 
+
+```
+
+The plot also shows a linear relationship between total murders and total shootings.
+
+
+### Conclusions
+
+1.  Over 71% of all shooting victims are black.
+2.  Over 40% of shootings occur in Brooklyn.
+3.  The Top 10 police precincts account for over 39% of the shootings.
+4.  There exists a linear relationship between the total number of murders and the total number of shootings.
+
+### Biases
+
+This analysis fails to take into account per capita data. As the data spans a 15-year period, determining the population and racial composition of each borough at the time of each shooting would be difficult.
+
+-   It may be that Brooklyn has a much greater population and the shootings per 1000 people might be less than other boroughs.
+
+-   This analysis does not look at the percentage of people with black race in New York. Again, without more data and further analysis, it is possible that the reason that ~70% of shooting victims are black may be because there is a greater than 70% black population
+
+### Session Info
+
+```{r confession-session, echo=FALSE}
+sessionInfo()
+```
